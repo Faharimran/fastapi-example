@@ -3,13 +3,15 @@ from datetime import datetime, timezone
 from fastapi.exceptions import HTTPException
 from fastapi.requests import Request
 from sqlmodel import SQLModel, create_engine , select, Field
-from fastapi import Depends
+from fastapi import Depends, Query
 from sqlmodel import Session
-from typing import Annotated, Generic, TypeVar, Any
+from typing import Annotated, Generic, TypeVar, Optional 
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
 from pydantic import BaseModel
 from annotated_types import T
+from sqlalchemy import func
+
 
 
 
@@ -46,8 +48,8 @@ async def lifespan(app : FastAPI):
     with Session(engine) as session:
         if not session.exec(select(Campaign)).first():
             session.add_all([
-                Campaign(name="Summer Launch", due_date=datetime.now()),
-                Campaign(name="Black Friday", due_date=datetime.now())
+                Campaign(name="Summer Launch", due_date=datetime.now(timezone.utc)),
+                Campaign(name="Black Friday", due_date=datetime.now(timezone.utc))
             ])
             session.commit()
     yield
@@ -59,10 +61,38 @@ class Response(BaseModel, Generic[T]):
 
 app = FastAPI(root_path="/api/v1",lifespan=lifespan)
 
-@app.get("/campaigns", response_model=Response[list[Campaign]])
-async def read_campaigns(session: SessionDep):
-    data = session.exec(select(Campaign)).all()
-    return {"data": data}
+class PaginatedResponse(BaseModel,Generic[T]):
+    data  : T
+    next : Optional[str]
+    prev : Optional[str]
+    # count : int
+
+@app.get("/campaigns", response_model=PaginatedResponse[list[Campaign]])
+async def read_campaigns(request: Request ,session: SessionDep, page : int = Query(1, ge=1), page_size : int = Query(20, ge=1)):
+    limit = page_size
+    offset = (page-1)*limit
+    data = session.exec(select(Campaign).order_by(Campaign.campaign_id).offset(offset).limit(limit)).all()
+
+    base_url = str(request.url).split("?")[0]
+
+    # total = session.exec(select(func.count()).select_from(Campaign)).one()
+
+    # if offset + limit < total:
+    #     next_url = f"{base_url}?page={page+1}&page_size={limit}"
+    # else:   
+    #     next_url = None
+
+    next_url = f"{base_url}?page={page+1}&page_size={limit}"
+    if page>1:
+        prev_url = f"{base_url}?page={page-1}&page_size={limit}"
+    else:   
+        prev_url = None    
+    return {
+        # "count":total,
+        "next": next_url,
+        "prev": prev_url,
+        "data": data
+        }
 
 @app.get("/campaigns/{id}", response_model=Response[Campaign])
 async def read_campaign(id: int, session: SessionDep):
