@@ -1,20 +1,25 @@
+import base64
+
 from fastapi import FastAPI
 from datetime import datetime, timezone
 from fastapi.exceptions import HTTPException
 from fastapi.requests import Request
 from sqlmodel import SQLModel, create_engine , select, Field
-from fastapi import Depends
+from fastapi import Depends, Query
 from sqlmodel import Session
-from typing import Annotated, Generic, TypeVar, Any
+from typing import Annotated, Generic, TypeVar, Optional 
 from contextlib import asynccontextmanager
 from fastapi.responses import Response
 from pydantic import BaseModel
 from annotated_types import T
+from sqlalchemy import func
+import json
+
 
 
 
 class Campaign(SQLModel, table=True):
-    campaign_id: int | None = Field(default = None, primary_key = True)
+    campaign_id: int = Field(default = None, primary_key = True)
     name: str = Field(index=True)
     due_date: datetime | None = Field(default = None, index=True)
     created_at: datetime = Field(default_factory = lambda: datetime.now(timezone.utc), nullable=True, index=True)
@@ -46,8 +51,8 @@ async def lifespan(app : FastAPI):
     with Session(engine) as session:
         if not session.exec(select(Campaign)).first():
             session.add_all([
-                Campaign(name="Summer Launch", due_date=datetime.now()),
-                Campaign(name="Black Friday", due_date=datetime.now())
+                Campaign(name="Summer Launch", due_date=datetime.now(timezone.utc)),
+                Campaign(name="Black Friday", due_date=datetime.now(timezone.utc))
             ])
             session.commit()
     yield
@@ -59,10 +64,42 @@ class Response(BaseModel, Generic[T]):
 
 app = FastAPI(root_path="/api/v1",lifespan=lifespan)
 
-@app.get("/campaigns", response_model=Response[list[Campaign]])
-async def read_campaigns(session: SessionDep):
-    data = session.exec(select(Campaign)).all()
-    return {"data": data}
+class PaginatedResponse(BaseModel,Generic[T]):
+    data  : T
+    next : Optional[str]
+    # prev : Optional[str]
+    # count : int
+def encode_cursor(value):
+    raw = json.dumps({'id': value})
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+    
+def decode_cursor(cursor):
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    payload = json.loads(raw)
+    return payload.get('id')
+
+
+@app.get("/campaigns", response_model=PaginatedResponse[list[Campaign]])
+async def read_campaigns(request: Request ,session: SessionDep, cursor : Optional[str] = Query(None), limit: int = Query(3, ge=1)):
+
+    cursor_id = 0
+    if cursor:
+        cursor_id = decode_cursor(cursor)
+
+    data = session.exec(select(Campaign).order_by(Campaign.campaign_id).where(Campaign.campaign_id > cursor_id).limit(limit+1)).all()
+    base_url = str(request.url).split("?")[0]
+
+    next_url = None 
+    if len(data) > limit:
+        next_cursor = encode_cursor(data[:limit][-1].campaign_id)
+        next_url = f"{base_url}?cursor={next_cursor}&limit={limit}"
+           
+    return {
+    
+        "next": next_url,
+       
+        "data": data[:limit]
+        }
 
 @app.get("/campaigns/{id}", response_model=Response[Campaign])
 async def read_campaign(id: int, session: SessionDep):
